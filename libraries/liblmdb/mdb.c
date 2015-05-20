@@ -2922,7 +2922,7 @@ mdb_txn_reset0(MDB_txn *txn, const char *act)
 		txn->mt_numdbs = 0;		/* prevent further DBI activity */
 		txn->mt_flags |= MDB_TXN_FINISHED;
 		txn->mt_dbxs = NULL;	/* mark txn as reset */
-	} else {
+	} else if (!(txn->mt_flags & MDB_TXN_FINISHED)) {
 		pgno_t *pghead = env->me_pghead;
 
 		mdb_cursors_close(txn, 0);
@@ -2981,8 +2981,11 @@ mdb_txn_abort(MDB_txn *txn)
 
 	mdb_txn_reset0(txn, "abort");
 	/* Free reader slot tied to this txn (if MDB_NOTLS && writable FS) */
-	if ((txn->mt_flags & MDB_TXN_RDONLY) && txn->mt_u.reader)
+	if ((txn->mt_flags & MDB_TXN_RDONLY) && txn->mt_u.reader) {
 		txn->mt_u.reader->mr_pid = 0;
+		/* Protect reader table from double mdb_txn_abort() */
+		txn->mt_u.reader = NULL;
+	}
 
 	if (txn != txn->mt_env->me_txn0)
 		free(txn);
