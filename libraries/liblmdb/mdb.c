@@ -3326,12 +3326,11 @@ mdb_txn_commit(MDB_txn *txn)
 	unsigned int i;
 	MDB_env	*env;
 
-	if (txn == NULL || txn->mt_env == NULL)
+	if (txn == NULL)
 		return EINVAL;
 
 	if (txn->mt_child) {
 		rc = mdb_txn_commit(txn->mt_child);
-		txn->mt_child = NULL;
 		if (rc)
 			goto fail;
 	}
@@ -3378,9 +3377,7 @@ mdb_txn_commit(MDB_txn *txn)
 		/* Update parent's DB table. */
 		memcpy(parent->mt_dbs, txn->mt_dbs, txn->mt_numdbs * sizeof(MDB_db));
 		parent->mt_numdbs = txn->mt_numdbs;
-		parent->mt_dbflags[0] = txn->mt_dbflags[0];
-		parent->mt_dbflags[1] = txn->mt_dbflags[1];
-		for (i=2; i<txn->mt_numdbs; i++) {
+		for (i=0; i<txn->mt_numdbs; i++) {
 			/* preserve parent's DB_NEW status */
 			x = parent->mt_dbflags[i] & DB_NEW;
 			parent->mt_dbflags[i] = txn->mt_dbflags[i] | x;
@@ -3531,12 +3528,10 @@ done:
 	env->me_pglast = 0;
 	env->me_txn = NULL;
 	mdb_dbis_update(txn, 1);
+	/* txn == env->me_txn0, so do not free() it */
 
 	if (env->me_txns)
 		UNLOCK_MUTEX(MDB_MUTEX(env, w));
-	if (txn != env->me_txn0)
-		free(txn);
-
 	return MDB_SUCCESS;
 
 fail:
