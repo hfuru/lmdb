@@ -1024,7 +1024,8 @@ typedef struct MDB_dbx {
 	 */
 struct MDB_txn {
 	MDB_txn		*mt_parent;		/**< parent of a nested txn */
-	MDB_txn		*mt_child;		/**< nested txn under this txn */
+	/** Nested txn under this txn, set together with flag #MDB_TXN_HAS_CHILD */
+	MDB_txn		*mt_child;
 	pgno_t		mt_next_pgno;	/**< next unallocated page */
 	/** The ID of this transaction. IDs are integers incrementing from 1.
 	 *	Only committed write transactions increment the ID. If a transaction
@@ -1072,8 +1073,9 @@ struct MDB_txn {
 	MDB_cursor	**mt_cursors;
 	/** Array of flags for each DB */
 	unsigned char	*mt_dbflags;
-	/**	Number of DB records in use. This number only ever increments;
-	 *	we don't decrement it when individual DB handles are closed.
+	/**	Number of DB records in use, or 0 when the txn is finished.
+	 *	This number only ever increments during the txn; we don't
+	 *	decrement it when individual DB handles are closed.
 	 */
 	MDB_dbi		mt_numdbs;
 
@@ -1091,6 +1093,10 @@ struct MDB_txn {
 #define MDB_TXN_ERROR		0x02		/**< txn is unusable after an error */
 #define MDB_TXN_DIRTY		0x04		/**< must write, even if dirty list is empty */
 #define MDB_TXN_SPILLS		0x08		/**< txn or a parent has spilled pages */
+#define MDB_TXN_FINISHED	0x10		/**< txn is finished or never began */
+#define MDB_TXN_HAS_CHILD	0x20		/**< txn has an #MDB_txn.%mt_child */
+	/** most operations on the txn are currently illegal */
+#define MDB_TXN_BLOCKED		(MDB_TXN_ERROR|MDB_TXN_HAS_CHILD|MDB_TXN_FINISHED)
 /** @} */
 	unsigned int	mt_flags;		/**< @ref mdb_txn */
 	/** #dirty_list room: Array size - \#dirty pages visible to this txn.
@@ -2753,8 +2759,7 @@ mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 	if (parent) {
 		/* Nested transactions: Max 1 child, write txns only, no writemap */
 		flags |= parent->mt_flags;
-		if (parent->mt_child ||
-			(flags & (MDB_RDONLY|MDB_WRITEMAP|MDB_TXN_ERROR)))
+		if (flags & (MDB_RDONLY|MDB_WRITEMAP|MDB_TXN_BLOCKED))
 		{
 			return (parent->mt_flags & MDB_TXN_RDONLY) ? EINVAL : MDB_BAD_TXN;
 		}
@@ -2814,6 +2819,7 @@ mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 		/* Copy parent's mt_dbflags, but clear DB_NEW */
 		for (i=0; i<txn->mt_numdbs; i++)
 			txn->mt_dbflags[i] = parent->mt_dbflags[i] & ~DB_NEW;
+		parent->mt_flags |= MDB_TXN_HAS_CHILD;
 		rc = 0;
 		ntxn = (MDB_ntxn *)txn;
 		ntxn->mnt_pgstate = env->me_pgstate; /* save parent me_pghead & co */
@@ -2913,7 +2919,8 @@ mdb_txn_reset0(MDB_txn *txn, const char *act)
 			if (!(env->me_flags & MDB_NOTLS))
 				txn->mt_u.reader = NULL; /* txn does not own reader */
 		}
-		txn->mt_numdbs = 0;		/* close nothing if called again */
+		txn->mt_numdbs = 0;		/* prevent further DBI activity */
+		txn->mt_flags |= MDB_TXN_FINISHED;
 		txn->mt_dbxs = NULL;	/* mark txn as reset */
 	} else {
 		pgno_t *pghead = env->me_pghead;
@@ -2922,6 +2929,9 @@ mdb_txn_reset0(MDB_txn *txn, const char *act)
 		if (!(env->me_flags & MDB_WRITEMAP)) {
 			mdb_dlist_free(txn);
 		}
+
+		txn->mt_numdbs = 0;
+		txn->mt_flags |= MDB_TXN_FINISHED;
 
 		if (!txn->mt_parent) {
 			if (mdb_midl_shrink(&txn->mt_free_pgs))
@@ -2936,6 +2946,7 @@ mdb_txn_reset0(MDB_txn *txn, const char *act)
 				UNLOCK_MUTEX(MDB_MUTEX(env, w));
 		} else {
 			txn->mt_parent->mt_child = NULL;
+			txn->mt_parent->mt_flags &= ~MDB_TXN_HAS_CHILD;
 			env->me_pgstate = ((MDB_ntxn *)txn)->mnt_pgstate;
 			mdb_midl_free(txn->mt_free_pgs);
 			mdb_midl_free(txn->mt_spill_pgs);
@@ -3531,6 +3542,9 @@ done:
 	env->me_txn = NULL;
 	mdb_dbis_update(txn, 1);
 	/* txn == env->me_txn0, so do not free() it */
+
+	txn->mt_numdbs = 0;			/* prevent further DBI activity */
+	txn->mt_flags |= MDB_TXN_FINISHED;
 
 	if (env->me_txns)
 		UNLOCK_MUTEX(MDB_MUTEX(env, w));
@@ -5304,8 +5318,8 @@ mdb_page_search(MDB_cursor *mc, MDB_val *key, int flags)
 	/* Make sure the txn is still viable, then find the root from
 	 * the txn's db table and set it as the root of the cursor's stack.
 	 */
-	if (F_ISSET(mc->mc_txn->mt_flags, MDB_TXN_ERROR)) {
-		DPUTS("transaction has failed, must abort");
+	if (mc->mc_txn->mt_flags & MDB_TXN_BLOCKED) {
+		DPUTS("transaction may not be used now");
 		return MDB_BAD_TXN;
 	} else {
 		/* Make sure we're using an up-to-date root */
@@ -5490,7 +5504,7 @@ mdb_get(MDB_txn *txn, MDB_dbi dbi,
 	if (!key || !data || !TXN_DBI_EXIST(txn, dbi, DB_USRVALID))
 		return EINVAL;
 
-	if (txn->mt_flags & MDB_TXN_ERROR)
+	if (txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	mdb_cursor_init(&mc, txn, dbi, &mx);
@@ -6008,7 +6022,7 @@ mdb_cursor_get(MDB_cursor *mc, MDB_val *key, MDB_val *data,
 	if (mc == NULL)
 		return EINVAL;
 
-	if (mc->mc_txn->mt_flags & MDB_TXN_ERROR)
+	if (mc->mc_txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	switch (op) {
@@ -6238,7 +6252,7 @@ mdb_cursor_put(MDB_cursor *mc, MDB_val *key, MDB_val *data,
 	nospill = flags & MDB_NOSPILL;
 	flags &= ~MDB_NOSPILL;
 
-	if (mc->mc_txn->mt_flags & (MDB_TXN_RDONLY|MDB_TXN_ERROR))
+	if (mc->mc_txn->mt_flags & (MDB_TXN_RDONLY|MDB_TXN_BLOCKED))
 		return (mc->mc_txn->mt_flags & MDB_TXN_RDONLY) ? EACCES : MDB_BAD_TXN;
 
 	if (key->mv_size-1 >= ENV_MAXKEY(env))
@@ -6717,7 +6731,7 @@ mdb_cursor_del(MDB_cursor *mc, unsigned int flags)
 	MDB_page	*mp;
 	int rc;
 
-	if (mc->mc_txn->mt_flags & (MDB_TXN_RDONLY|MDB_TXN_ERROR))
+	if (mc->mc_txn->mt_flags & (MDB_TXN_RDONLY|MDB_TXN_BLOCKED))
 		return (mc->mc_txn->mt_flags & MDB_TXN_RDONLY) ? EACCES : MDB_BAD_TXN;
 
 	if (!(mc->mc_flags & C_INITIALIZED))
@@ -7250,7 +7264,7 @@ mdb_cursor_open(MDB_txn *txn, MDB_dbi dbi, MDB_cursor **ret)
 	if (!ret || !TXN_DBI_EXIST(txn, dbi, DB_VALID))
 		return EINVAL;
 
-	if (txn->mt_flags & MDB_TXN_ERROR)
+	if (txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	/* Allow read access to the freelist */
@@ -7285,7 +7299,7 @@ mdb_cursor_renew(MDB_txn *txn, MDB_cursor *mc)
 	if ((mc->mc_flags & C_UNTRACK) || txn->mt_cursors)
 		return EINVAL;
 
-	if (txn->mt_flags & MDB_TXN_ERROR)
+	if (txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	mdb_cursor_init(mc, txn, mc->mc_dbi, mc->mc_xcursor);
@@ -7304,7 +7318,7 @@ mdb_cursor_count(MDB_cursor *mc, size_t *countp)
 	if (mc->mc_xcursor == NULL)
 		return MDB_INCOMPATIBLE;
 
-	if (mc->mc_txn->mt_flags & MDB_TXN_ERROR)
+	if (mc->mc_txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	if (!(mc->mc_flags & C_INITIALIZED))
@@ -8031,7 +8045,7 @@ mdb_del(MDB_txn *txn, MDB_dbi dbi,
 	if (!key || !TXN_DBI_EXIST(txn, dbi, DB_USRVALID))
 		return EINVAL;
 
-	if (txn->mt_flags & (MDB_TXN_RDONLY|MDB_TXN_ERROR))
+	if (txn->mt_flags & (MDB_TXN_RDONLY|MDB_TXN_BLOCKED))
 		return (txn->mt_flags & MDB_TXN_RDONLY) ? EACCES : MDB_BAD_TXN;
 
 	if (!F_ISSET(txn->mt_dbs[dbi].md_flags, MDB_DUPSORT)) {
@@ -9219,7 +9233,7 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 
 	if (flags & ~VALID_FLAGS)
 		return EINVAL;
-	if (txn->mt_flags & MDB_TXN_ERROR)
+	if (txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	/* main DB? */
@@ -9316,7 +9330,7 @@ mdb_stat(MDB_txn *txn, MDB_dbi dbi, MDB_stat *arg)
 	if (!arg || !TXN_DBI_EXIST(txn, dbi, DB_VALID))
 		return EINVAL;
 
-	if (txn->mt_flags & MDB_TXN_ERROR)
+	if (txn->mt_flags & MDB_TXN_BLOCKED)
 		return MDB_BAD_TXN;
 
 	if (txn->mt_dbflags[dbi] & DB_STALE) {
