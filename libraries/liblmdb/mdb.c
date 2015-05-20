@@ -2811,14 +2811,14 @@ mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 		txn->mt_u.dirty_list[0].mid = 0;
 		txn->mt_spill_pgs = NULL;
 		txn->mt_next_pgno = parent->mt_next_pgno;
-		parent->mt_child = txn;
-		txn->mt_parent = parent;
 		txn->mt_numdbs = parent->mt_numdbs;
 		txn->mt_dbxs = parent->mt_dbxs;
 		memcpy(txn->mt_dbs, parent->mt_dbs, txn->mt_numdbs * sizeof(MDB_db));
 		/* Copy parent's mt_dbflags, but clear DB_NEW */
 		for (i=0; i<txn->mt_numdbs; i++)
 			txn->mt_dbflags[i] = parent->mt_dbflags[i] & ~DB_NEW;
+		txn->mt_parent = parent;
+		parent->mt_child = txn;
 		parent->mt_flags |= MDB_TXN_HAS_CHILD;
 		rc = 0;
 		ntxn = (MDB_ntxn *)txn;
@@ -3382,7 +3382,6 @@ mdb_txn_commit(MDB_txn *txn)
 		 */
 
 		parent->mt_next_pgno = txn->mt_next_pgno;
-		parent->mt_flags = txn->mt_flags;
 
 		/* Merge our cursors into parent's and close them */
 		mdb_cursors_close(txn, 1);
@@ -3455,7 +3454,7 @@ mdb_txn_commit(MDB_txn *txn)
 				/* TODO: Prevent failure here, so parent does not fail */
 				rc = mdb_midl_append_list(&parent->mt_spill_pgs, txn->mt_spill_pgs);
 				if (rc)
-					parent->mt_flags |= MDB_TXN_ERROR;
+					txn->mt_flags |= MDB_TXN_ERROR;
 				mdb_midl_free(txn->mt_spill_pgs);
 				mdb_midl_sort(parent->mt_spill_pgs);
 			} else {
@@ -3470,6 +3469,8 @@ mdb_txn_commit(MDB_txn *txn)
 		parent->mt_loose_count += txn->mt_loose_count;
 
 		parent->mt_child = NULL;
+		parent->mt_flags = txn->mt_flags;
+
 		mdb_midl_free(((MDB_ntxn *)txn)->mnt_pgstate.mf_pghead);
 		free(txn);
 		return rc;
