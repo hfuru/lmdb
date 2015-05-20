@@ -9237,10 +9237,6 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 		return MDB_SUCCESS;
 	}
 
-	if (txn->mt_dbxs[MAIN_DBI].md_cmp == NULL) {
-		mdb_default_cmp(txn, MAIN_DBI);
-	}
-
 	/* Is the DB already open? */
 	len = strlen(name);
 	for (i=2; i<txn->mt_numdbs; i++) {
@@ -9263,6 +9259,9 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 	/* Cannot mix named databases with some mainDB flags */
 	if (txn->mt_dbs[MAIN_DBI].md_flags & (MDB_DUPSORT|MDB_INTEGERKEY))
 		return (flags & MDB_CREATE) ? MDB_INCOMPATIBLE : MDB_NOTFOUND;
+
+	if (!txn->mt_dbxs[MAIN_DBI].md_cmp)
+		mdb_default_cmp(txn, MAIN_DBI);
 
 	/* Find the DB info */
 	dbflag = DB_NEW|DB_VALID|DB_USRVALID;
