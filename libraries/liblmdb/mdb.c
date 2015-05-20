@@ -3342,27 +3342,27 @@ mdb_txn_commit(MDB_txn *txn)
 	if (txn == NULL)
 		return EINVAL;
 
+	env = txn->mt_env;
+
+	if (txn->mt_flags & (MDB_TXN_ERROR|MDB_TXN_FINISHED)) {
+		DPUTS("txn has failed/finished, can't commit");
+		if (txn->mt_parent)
+			txn->mt_parent->mt_flags |= MDB_TXN_ERROR;
+		rc = MDB_BAD_TXN;
+		goto fail;
+	}
+
 	if (txn->mt_child) {
 		rc = mdb_txn_commit(txn->mt_child);
 		if (rc)
 			goto fail;
 	}
 
-	env = txn->mt_env;
-
 	if (F_ISSET(txn->mt_flags, MDB_TXN_RDONLY)) {
 		mdb_dbis_update(txn, 1);
 		txn->mt_numdbs = 2; /* so txn_abort() doesn't close any new handles */
 		mdb_txn_abort(txn);
 		return MDB_SUCCESS;
-	}
-
-	if (F_ISSET(txn->mt_flags, MDB_TXN_ERROR)) {
-		DPUTS("error flag is set, can't commit");
-		if (txn->mt_parent)
-			txn->mt_parent->mt_flags |= MDB_TXN_ERROR;
-		rc = MDB_BAD_TXN;
-		goto fail;
 	}
 
 	if (txn->mt_parent) {
