@@ -2596,7 +2596,6 @@ mdb_txn_renew0(MDB_txn *txn)
 		txn->mt_flags &= MDB_TXN_BEGIN_FLAGS;
 		/* Setup db info */
 		txn->mt_numdbs = env->me_numdbs;
-		txn->mt_dbxs = env->me_dbxs;	/* mostly static anyway */
 		if (!ti) {
 			meta = env->me_metas[ mdb_env_pick_meta(env) ];
 			txn->mt_txnid = meta->mm_txnid;
@@ -2721,7 +2720,7 @@ mdb_txn_renew(MDB_txn *txn)
 {
 	int rc;
 
-	if (!txn || txn->mt_dbxs)	/* A reset txn has mt_dbxs==NULL */
+	if (!txn || !F_ISSET(txn->mt_flags, MDB_TXN_RDONLY|MDB_TXN_FINISHED))
 		return EINVAL;
 
 	if (txn->mt_env->me_flags & MDB_FATAL_ERROR) {
@@ -2779,6 +2778,7 @@ mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 		DPRINTF(("calloc: %s", strerror(errno)));
 		return ENOMEM;
 	}
+	txn->mt_dbxs = env->me_dbxs;	/* static */
 	txn->mt_dbs = (MDB_db *) ((char *)txn + tsize);
 	if (flags & MDB_RDONLY) {
 		txn->mt_dbflags = (unsigned char *)(txn->mt_dbs + env->me_maxdbs);
@@ -2812,7 +2812,6 @@ mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 		txn->mt_spill_pgs = NULL;
 		txn->mt_next_pgno = parent->mt_next_pgno;
 		txn->mt_numdbs = parent->mt_numdbs;
-		txn->mt_dbxs = parent->mt_dbxs;
 		memcpy(txn->mt_dbs, parent->mt_dbs, txn->mt_numdbs * sizeof(MDB_db));
 		/* Copy parent's mt_dbflags, but clear DB_NEW */
 		for (i=0; i<txn->mt_numdbs; i++)
@@ -2921,7 +2920,6 @@ mdb_txn_reset0(MDB_txn *txn, const char *act)
 		}
 		txn->mt_numdbs = 0;		/* prevent further DBI activity */
 		txn->mt_flags |= MDB_TXN_FINISHED;
-		txn->mt_dbxs = NULL;	/* mark txn as reset */
 	} else if (!(txn->mt_flags & MDB_TXN_FINISHED)) {
 		pgno_t *pghead = env->me_pghead;
 
