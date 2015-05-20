@@ -1308,7 +1308,7 @@ static int	mdb_cursor_push(MDB_cursor *mc, MDB_page *mp);
 
 static int	mdb_cursor_del0(MDB_cursor *mc);
 static int	mdb_del0(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data, unsigned flags);
-static int	mdb_cursor_sibling(MDB_cursor *mc, int move_right);
+static int	mdb_cursor_sibling(MDB_cursor *mc, int direction);
 static int	mdb_cursor_next(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op);
 static int	mdb_cursor_prev(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op);
 static int	mdb_cursor_set(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op,
@@ -5499,16 +5499,18 @@ mdb_get(MDB_txn *txn, MDB_dbi dbi,
  * Replaces the page at the top of the cursor's stack with the
  * specified sibling, if one exists.
  * @param[in] mc The cursor for this operation.
- * @param[in] move_right Non-zero if the right sibling is requested,
- * otherwise the left sibling.
+ * @param[in] direction +1 for the right sibling, -1 for the left sibling.
  * @return 0 on success, non-zero on failure.
  */
 static int
-mdb_cursor_sibling(MDB_cursor *mc, int move_right)
+mdb_cursor_sibling(MDB_cursor *mc, int direction)
 {
 	int		 rc;
 	MDB_node	*indx;
 	MDB_page	*mp;
+#if MDB_DEBUG
+	static const char *const dname[] = {"left", NULL, "right"};
+#endif
 
 	if (mc->mc_snum < 2) {
 		return MDB_NOTFOUND;		/* root has no siblings */
@@ -5518,23 +5520,20 @@ mdb_cursor_sibling(MDB_cursor *mc, int move_right)
 	DPRINTF(("parent page is page %"Z"u, index %u",
 		mc->mc_pg[mc->mc_top]->mp_pgno, mc->mc_ki[mc->mc_top]));
 
-	if (move_right ? (mc->mc_ki[mc->mc_top] + 1u >= NUMKEYS(mc->mc_pg[mc->mc_top]))
+	if (direction >= 0 ? (mc->mc_ki[mc->mc_top] + 1u >= NUMKEYS(mc->mc_pg[mc->mc_top]))
 		       : (mc->mc_ki[mc->mc_top] == 0)) {
 		DPRINTF(("no more keys left, moving to %s sibling",
-		    move_right ? "right" : "left"));
-		if ((rc = mdb_cursor_sibling(mc, move_right)) != MDB_SUCCESS) {
+			dname[1+direction]));
+		if ((rc = mdb_cursor_sibling(mc, direction)) != MDB_SUCCESS) {
 			/* undo cursor_pop before returning */
 			mc->mc_top++;
 			mc->mc_snum++;
 			return rc;
 		}
 	} else {
-		if (move_right)
-			mc->mc_ki[mc->mc_top]++;
-		else
-			mc->mc_ki[mc->mc_top]--;
+		mc->mc_ki[mc->mc_top] += direction;
 		DPRINTF(("just moving to %s index key %u",
-		    move_right ? "right" : "left", mc->mc_ki[mc->mc_top]));
+		    dname[1+direction], mc->mc_ki[mc->mc_top]));
 	}
 	mdb_cassert(mc, IS_BRANCH(mc->mc_pg[mc->mc_top]));
 
@@ -5546,7 +5545,7 @@ mdb_cursor_sibling(MDB_cursor *mc, int move_right)
 	}
 
 	mdb_cursor_push(mc, mp);
-	if (!move_right)
+	if (direction < 0)
 		mc->mc_ki[mc->mc_top] = NUMKEYS(mp)-1;
 
 	return MDB_SUCCESS;
@@ -5670,7 +5669,7 @@ mdb_cursor_prev(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op)
 
 	if (mc->mc_ki[mc->mc_top] == 0)  {
 		DPUTS("=====> move to prev sibling page");
-		if ((rc = mdb_cursor_sibling(mc, 0)) != MDB_SUCCESS) {
+		if ((rc = mdb_cursor_sibling(mc, -1)) != MDB_SUCCESS) {
 			return rc;
 		}
 		mp = mc->mc_pg[mc->mc_top];
@@ -8332,7 +8331,7 @@ mdb_page_split(MDB_cursor *mc, MDB_val *newkey, MDB_val *newdata, pgno_t newpgno
 			} else {
 				/* find right page's left sibling */
 				mc->mc_ki[ptop] = mn.mc_ki[ptop];
-				mdb_cursor_sibling(mc, 0);
+				mdb_cursor_sibling(mc, -1);
 			}
 		}
 	} else {
